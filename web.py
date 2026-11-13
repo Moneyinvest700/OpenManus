@@ -1,12 +1,16 @@
-import json, os, signal, subprocess, threading, time
+import json, os, signal, subprocess, threading, time, crypt, hmac, secrets, re
+from http.cookies import SimpleCookie
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, parse_qs
 
 key=Path('/run/secrets/gemini_key').read_text().strip()
 model=os.environ.get('GEMINI_MODEL','gemini-3.5-flash-lite')
 Path('config/config.toml').write_text('[llm]\nmodel='+json.dumps(model)+'\nbase_url="https://generativelanguage.googleapis.com/v1beta/openai/"\napi_key='+json.dumps(key)+'\nmax_tokens=4096\ntemperature=0.2\n[browser]\nheadless=true\ndisable_security=false\n')
 del key
+auth_hash=Path('/run/secrets/auth.htpasswd').read_text().strip().split(':',1)[1]
+sessions={}
+LOGIN='<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Private OpenManus</title><body style="background:#0b1220;color:white;font:18px system-ui"><form method="post" action="/login" style="max-width:360px;margin:15vh auto;padding:24px"><h1>OpenManus</h1><p>Private workspace</p><input name="username" autocomplete="username" placeholder="Username" required style="display:block;padding:14px;margin-bottom:12px;width:90%"><input type="password" name="password" autocomplete="current-password" placeholder="Password" required style="display:block;padding:14px;margin-bottom:20px;width:90%"><button style="padding:14px 24px">Sign in</button></form></body>'
 lock=threading.Lock()
 proc=None
 output='Ready. Each run is limited to 8 steps and 5 minutes. One run at a time.'
@@ -22,7 +26,7 @@ def worker(prompt):
  timer=threading.Timer(300,lambda:kill(p));timer.start()
  try:
   for line in iter(p.stdout.readline,b''):
-   with lock:output=(output+line.decode(errors='replace'))[-50000:]
+   with lock:output=(output+re.sub(r'\x1b\[[0-9;]*m','',line.decode(errors='replace')))[-50000:]
   p.wait()
  finally:
   timer.cancel()
@@ -37,7 +41,14 @@ class Handler(BaseHTTPRequestHandler):
  def log_message(self,*a):pass
  def reply(self,code,data,kind='application/json'):
   b=(json.dumps(data) if kind=='application/json' else data).encode();self.send_response(code);self.send_header('Content-Type',kind);self.send_header('Content-Length',str(len(b)));self.send_header('Cache-Control','no-store');self.send_header('X-Content-Type-Options','nosniff');self.end_headers();self.wfile.write(b)
+ def authed(self):
+  try:
+   c=SimpleCookie(self.headers.get('Cookie','')); token=c['manus_session'].value
+   return sessions.get(token,0)>time.time()
+  except Exception:return False
  def do_GET(self):
+  if not self.authed():
+   return self.reply(200,LOGIN,'text/html; charset=utf-8') if self.path=='/' else self.reply(401,{'error':'Sign in required'})
   if self.path=='/':self.reply(200,PAGE,'text/html; charset=utf-8')
   elif self.path=='/status':self.reply(200,{'status':status,'output':output})
   else:self.reply(404,{'error':'Not found'})
@@ -45,6 +56,16 @@ class Handler(BaseHTTPRequestHandler):
   global status
   origin=self.headers.get('Origin')
   if origin and urlsplit(origin).netloc!=self.headers.get('Host'):return self.reply(403,{'error':'Origin rejected'})
+  if self.path=='/login':
+   n=int(self.headers.get('Content-Length','0'))
+   if n>1000:return self.reply(400,{})
+   data=parse_qs(self.rfile.read(n).decode())
+   pw=data.get('password',[''])[0]
+   if data.get('username',[''])[0]!='abhay' or not hmac.compare_digest(crypt.crypt(pw,auth_hash),auth_hash):
+    time.sleep(1);return self.reply(401,'Sign-in failed. Go back and try again.','text/plain')
+   token=secrets.token_urlsafe(32);sessions[token]=time.time()+28800
+   self.send_response(303);self.send_header('Location','/');self.send_header('Set-Cookie','manus_session='+token+'; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=28800');self.send_header('Content-Length','0');self.end_headers();return
+  if not self.authed():return self.reply(401,{'error':'Sign in required'})
   try:
    n=int(self.headers.get('Content-Length','0'))
    if n>16000:raise ValueError()
