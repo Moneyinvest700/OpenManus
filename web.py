@@ -6,7 +6,7 @@ from urllib.parse import urlsplit, parse_qs
 
 key=Path('/run/secrets/gemini_key').read_text().strip()
 model=os.environ.get('GEMINI_MODEL','gemini-3.5-flash-lite')
-Path('config/config.toml').write_text('[llm]\nmodel='+json.dumps(model)+'\nbase_url="https://generativelanguage.googleapis.com/v1beta/openai/"\napi_key='+json.dumps(key)+'\nmax_tokens=4096\ntemperature=0.2\n[browser]\nheadless=true\ndisable_security=false\n')
+Path('config/config.toml').write_text('[llm]\nmodel='+json.dumps(model)+'\nbase_url="https://generativelanguage.googleapis.com/v1beta/openai/"\napi_key='+json.dumps(key)+'\nmax_tokens=4096\ntemperature=0.2\n[browser]\nheadless=true\ndisable_security=false\n[daytona]\ndaytona_api_key=""\n')
 del key
 auth_hash=Path('/run/secrets/auth.htpasswd').read_text().strip().split(':',1)[1]
 sessions={}
